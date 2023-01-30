@@ -86,6 +86,16 @@ if __name__ == '__main__':
                     layer_init(nn.Linear(64, envs.single_action_space.n), std=0.01),
                 )
 
+            def get_value(self, x):
+                return self.critic(x)
+
+            def get_action_and_value(self, x, action=None):
+                logits = self.actor(x)
+                probs = Categorical(logits=logits)
+                if action is None:
+                    action = probs.sample()
+                return action, probs.log_prob(action), probs.entropy(), self.critic(x)
+
         # env setup
         envs = gym.vector.SyncVectorEnv(
             [make_env(args.gym_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
@@ -111,6 +121,11 @@ if __name__ == '__main__':
         next_done = torch.zeros(args.num_envs).to(device)
         num_updates = args.total_timesteps // args.batch_size
         print(num_updates)
+        print("next_obs.shape", next_obs.shape)
+        print("agent.get_value(next_obs)", agent.get_value(next_obs))
+        print("agent.get_value(next_obs).shape", agent.get_value(next_obs).shape)
+        print()
+        print("agent.get_action_and_value(next_obs)", agent.get_action_and_value(next_obs))
 
         # observation = envs.reset()
         # for _ in range(200):
