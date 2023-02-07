@@ -29,6 +29,7 @@ def parse_args() -> None:
 
     parser.add_argument("--num-envs", type=int, default=4, help="the number of parallel game environments")
     parser.add_argument("--num-steps", type=int, default=128, help="the number of steps to run in each environment per policy rollout")
+    parser.add_argument("--anneal-lr", type=lambda x: bool(s2b(x)), default=True, nargs='?', const=True, help="toggle learning rate annealing for policy and value networks")
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     return args
@@ -101,8 +102,6 @@ if __name__ == '__main__':
             [make_env(args.gym_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
         )
         assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
-        print("envs.single_observation_space.shape", envs.single_observation_space.shape)
-        print("envs.single_action_space.n", envs.single_action_space.n)
 
         agent = Agent(envs).to(device)
         optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
@@ -120,20 +119,48 @@ if __name__ == '__main__':
         next_obs = torch.Tensor(envs.reset()).to(device)
         next_done = torch.zeros(args.num_envs).to(device)
         num_updates = args.total_timesteps // args.batch_size
-        print(num_updates)
-        print("next_obs.shape", next_obs.shape)
-        print("agent.get_value(next_obs)", agent.get_value(next_obs))
-        print("agent.get_value(next_obs).shape", agent.get_value(next_obs).shape)
-        print()
-        print("agent.get_action_and_value(next_obs)", agent.get_action_and_value(next_obs))
+        
+        for update in range(1, num_updates + 1):
+            if args.anneal_lr:
+                frac = 1.0 - (update - 1.0) / num_updates
+                new_learning_rate = frac * args.learning_rate
+                optimizer.param_groups[0]['lr'] = new_learning_rate
+            
+            for step in range(0, args.num_steps):
+                global_step += 1 * args.num_envs
+                obs[step] = next_obs
+                dones[step] = next_done
 
-        # observation = envs.reset()
-        # for _ in range(200):
-        #     action = envs.action_space.sample()
-        #     observation, reward, done, info = envs.step(action)
-        #     for item in info:
-        #         if "episode" in item.keys():
-        #             print(f"episodic return {item['episode']['r']}")
-        # envs.close()
+                # ALGO LOGIC: action logic
+                with torch.no_grad():
+                    action, logprob, _, value = agent.get_action_and_value(next_obs)
+                    values[step] = value.flatten()
+                actions[step] = action
+                logprobs[step] = logprob
+
+                # Execute the game and log data
+                next_obs, reward, done, info = envs.step(action.cpu().numpy())
+                rewards[step] = torch.tensor(reward).to(device).view(-1)
+                next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
+
+                for item in info:
+                    if "episode" in item.keys():
+                        print(f"global_step={global_step}, episodic_return={item['episode']['r']}")
+                        mlflow.log_metric("episodic return", item["episode"]["r"], global_step)
+                        mlflow.log_metric("episodic length", item["episode"]["l"], global_step)
+                        
+            with torch.no_grad():
+                next_value = agent.get_value(next_obs).reshape(1, -1)
+                if args.gae:
+                    advantages = torch.zeros_like(rewards).to(device)
+                    lastgaelam = 0
+                    for t in reversed(range(args.num_steps)):
+                        if t == args.num_steps -1:
+                            nextnonterminal = 1.0 - next_done
+                            nextvalues = next_value
+                        else:
+                            nextnonterminal = 1.0 - dones[t + 1]
+                            nextvalues = values[t + 1]
+                
 
         # mlflow.log_artifacts("videos")
